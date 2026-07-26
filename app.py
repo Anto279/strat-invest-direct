@@ -3,15 +3,13 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score
 
 # Importation de vos modules locaux
 from src.data_loader import DataLoader
 from src.features import FeatureEngineer
-# On importe XGBoostModeler au lieu de RegressionModels
 from src.models import ModelPreparator, XGBoostModeler, StatisticalModeler, ASSETS_CONFIG
 from src.strategy import Strategy
-from sklearn.metrics import mean_squared_error, accuracy_score
 
 # Configuration de la page
 st.set_page_config(
@@ -47,7 +45,7 @@ USER_PORTFOLIO_2 = [
 ]
 # '^IXIC',   # Nasdaq
 
-USER_PORTFOLIO = [
+USER_PORTFOLIO_bis = [
     'XLK',  # Technologie
     'XLF',  # Finance
     'XLV',  # Santé
@@ -59,6 +57,26 @@ USER_PORTFOLIO = [
     'XLB',  # Matériaux
     'XLU',  # Utilities
     # 'XLRE' # Immobilier too young
+]
+
+# Portefeuille Global Macro (Optimal pour Markowitz L2, GARCH et HMM)
+# Actifs sélectionnés pour leur décorrélation structurelle et leur liquidité.
+USER_PORTFOLIO = [
+    # --- 1. Moteurs de Performance (Equities / Risk-On) ---
+    'SPY',   # S&P 500 (Large Cap US - Le cœur du risque action)
+    'QQQ',   # Nasdaq 100 (Tech US - Fort Beta, forte convexité)
+    'EFA',   # Développés hors US (Europe/Japon - Diversification géo)
+    'EEM',   # Marchés Émergents (Prime de risque différente)
+
+    # --- 2. Amortisseurs & Taux (Fixed Income / Risk-Off) ---
+    'TLT',   # Treasuries US 20+ ans (Couverture absolue en cas de Krach déflationniste)
+    'IEF',   # Treasuries US 7-10 ans (Le ventre de la courbe des taux)
+    'LQD',   # Corporate Bonds IG (Hybride entre taux et risque crédit)
+
+    # --- 3. Actifs Réels & Couverture (Alternatives) ---
+    'GLD',   # Or Physique (Valeur refuge pure, corrélation proche de 0 avec les actions)
+    'DBC',   # Broad Commodities (Couverture contre les chocs inflationnistes)
+    'VNQ',   # US Real Estate / REITs (Sensible aux taux, décorrélation partielle)
 ]
 
 # Portefeuille Utilisateur (Indices Actions + ETFs pour le reste)
@@ -85,6 +103,25 @@ def get_full_data():
     """
     tickers_2 = ['^GSPC', '^IXIC', '^FCHI', 'TLT', 'GLD', 'EURUSD=X', 'USO', 'VNQ']
     tickers = [
+    '^GSPC',   # S&P 500  
+    # --- 1. Moteurs de Performance (Equities / Risk-On) ---
+    'SPY',   # S&P 500 (Large Cap US - Le cœur du risque action)
+    'QQQ',   # Nasdaq 100 (Tech US - Fort Beta, forte convexité)
+    'EFA',   # Développés hors US (Europe/Japon - Diversification géo)
+    'EEM',   # Marchés Émergents (Prime de risque différente)
+
+    # --- 2. Amortisseurs & Taux (Fixed Income / Risk-Off) ---
+    'TLT',   # Treasuries US 20+ ans (Couverture absolue en cas de Krach déflationniste)
+    'IEF',   # Treasuries US 7-10 ans (Le ventre de la courbe des taux)
+    'LQD',   # Corporate Bonds IG (Hybride entre taux et risque crédit)
+
+    # --- 3. Actifs Réels & Couverture (Alternatives) ---
+    'GLD',   # Or Physique (Valeur refuge pure, corrélation proche de 0 avec les actions)
+    'DBC',   # Broad Commodities (Couverture contre les chocs inflationnistes)
+    'VNQ',   # US Real Estate / REITs (Sensible aux taux, décorrélation partielle)
+]
+
+    tickers_bis = [
     '^GSPC',  # S&P 500
     'XLK',  # Technologie
     'XLF',  # Finance
@@ -939,8 +976,8 @@ elif selection == "2. Modélisation (GARCH & ARIMA-XGBoost)":
                 # 4. Sélection de la target alignée
                 y_train_xgb = y_target_resid.loc[common_index_train]
 
-                # Entraînement
-                xgb_modeler = XGBoostModeler(n_estimators=n_estim, max_depth=2, learning_rate=0.05)
+                # Entraînement avec Ensembling (n_models=5 par défaut)
+                xgb_modeler = XGBoostModeler(n_estimators=n_estim, max_depth=2, learning_rate=0.05, n_models=5)
                 xgb_modeler.train(X_train_aligned, y_train_xgb, use_custom_loss=False) # MSE pour la stabilité
 
                 # Prédiction des résidus sur le Test
@@ -1322,7 +1359,7 @@ elif selection == "2. Modélisation (GARCH & ARIMA-XGBoost)":
                             y_train_xgb_wf = y_xgb_target.loc[common_idx]
                             
                             # 5. Entraînement
-                            wf_xgb_modeler = XGBoostModeler(n_estimators=n_estim, max_depth=2, learning_rate=0.05)
+                            wf_xgb_modeler = XGBoostModeler(n_estimators=n_estim, max_depth=2, learning_rate=0.05, n_models=5)
                             wf_xgb_modeler.train(X_train_wf, y_train_xgb_wf, use_custom_loss=False)
                             
                             # 6. Prédiction
@@ -1495,10 +1532,20 @@ elif selection == "3. Backtesting & Performance":
     else:
         st.info("ℹ️ **Mode SMA Activé** : L'algorithme interdira l'achat (Position = 0) sur les actifs en tendance baissière (Prix < SMA50 < SMA200).")
 
- 
     # --- GESTION DE L'ÉTAT (SESSION STATE) ---
     if st.button("Lancer le Backtest Mensuel", type="primary"):
-        with st.spinner("Simulation en cours..."):
+        
+        # --- NOUVEAU : Création des éléments UI pour la progression ---
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        def update_progress(fraction):
+            # Sécurité pour contraindre la valeur entre 0.0 et 1.0
+            clamped_fraction = max(0.0, min(1.0, fraction))
+            progress_bar.progress(clamped_fraction)
+            status_text.text(f"Simulation en cours : {int(clamped_fraction * 100)} %")
+
+        with st.spinner("Initialisation du moteur de stratégie..."):
             try:
                 # Initialisation du moteur
                 bt_engine = WalkForwardBacktest(
@@ -1510,32 +1557,34 @@ elif selection == "3. Backtesting & Performance":
                 
                 if use_tranching:
                     # --- MODE 1 : TRANCHING (Multi-Courbes) ---
-                    # Retourne un DICTIONNAIRE de résultats : {'Tranche_0': {...}, 'Tranche_1': ...}
                     tranches_results = bt_engine.run_with_tranching(
                         start_date=start_date_bt.strftime('%Y-%m-%d'),
                         step_weeks=4,
                         turnover_buffer=0.40,
-                        regime_method=regime_method_code
+                        regime_method=regime_method_code,
+                        progress_callback=update_progress # Injection vers le backtest
                     )
                     st.session_state['bt_tranches_results'] = tranches_results
                     st.session_state['bt_mode'] = 'tranching'
-                    st.info("ℹ️ Mode Tranching : 4 scénarios générés pour analyse comparative.")
                     
                 else:
                     # --- MODE 2 : STANDARD (Unique) ---
-                    # Retourne un DATAFRAME unique
                     results_df = bt_engine.run(
                         start_date=start_date_bt.strftime('%Y-%m-%d'),
                         step_weeks=4,
                         turnover_buffer=0.40,
-                        regime_method=regime_method_code
+                        regime_method=regime_method_code,
+                        progress_callback=update_progress # Injection vers le backtest
                     )
                     metrics = bt_engine.get_metrics(results_df)
                     
                     st.session_state['bt_results'] = results_df
                     st.session_state['bt_metrics'] = metrics
                     st.session_state['bt_mode'] = 'standard'
-                    st.info("⚠️ Mode Standard (Sensible au Timing).")
+                
+                # Fin de la progression
+                progress_bar.empty()
+                status_text.empty()
                 
                 # Sauvegarde du moteur pour les plots
                 st.session_state['bt_engine'] = bt_engine 
@@ -1818,7 +1867,7 @@ if selection == "4. Live Trading Dashboard":
         tab_res1, tab_res2 = st.tabs(["📋 Tableau des Ordres", "📊 Analyse Allocation"])
         
         with tab_res1:
-            st.markdown("### 🛒 Ordres à exécuter pour la semaine prochaine")
+            st.markdown("### 🛒 Ordres à exécuter pour l'horizon d'investissement")
             
             # Formatage pour affichage propre
             display_cols = ['Prix Actuel', 'Allocation Actuelle (%)', 'Allocation Cible (%)', 'Différence (%)', 'Ordre ($)', 'Ordre (Qté)']
@@ -1847,9 +1896,9 @@ if selection == "4. Live Trading Dashboard":
             
             with c_chart1:
                 st.markdown("#### Prédictions du Modèle")
-                st.caption("Ce que le modèle anticipe pour la semaine prochaine.")
+                st.caption("Ce que le modèle anticipe pour le prochain horizon d'investissement.")
                 st.dataframe(
-                    df_orders[['Rendement Espéré (Semaine)', 'Volatilité (Semaine)']].style.format("{:.2f}%").background_gradient(cmap='Greens'),
+                    df_orders[['Rendement Espéré (Horizon)', 'Volatilité (Horizon)']].style.format("{:.2f}%").background_gradient(cmap='Greens'),
                     use_container_width=True
                 )
             

@@ -26,7 +26,7 @@ class WalkForwardBacktest:
         self.history = []
         self.weights_history = []
 
-    def run(self, start_date, step_weeks=4, turnover_buffer=0.40, regime_method='sma'):
+    def run(self, start_date, step_weeks=4, turnover_buffer=0.40, regime_method='sma', progress_callback=None):
         available_dates = self.data.index.get_level_values('Date').unique().sort_values()
         
         try:
@@ -42,7 +42,15 @@ class WalkForwardBacktest:
         # --- PARAMÈTRE TAUX SANS RISQUE FIXE ---
         RISK_FREE_RATE_ANNUAL = 0.02  # 2% par an (Ajustez à 0.04 ou 0.05 pour être réaliste aujourd'hui)
         
-        for i in range(start_idx, len(available_dates) - 1, step_weeks):
+        # --- NOUVEAU : Préparation de la barre de progression ---
+        steps_list = list(range(start_idx, len(available_dates) - 1, step_weeks))
+        total_steps = len(steps_list)
+        
+        for step_count, i in enumerate(steps_list):
+            # Envoi de l'état de progression à Streamlit
+            if progress_callback is not None and total_steps > 0:
+                progress_callback((step_count + 1) / total_steps)
+
             current_date = available_dates[i]
             next_idx = min(i + step_weeks, len(available_dates) - 1)
             next_date = available_dates[next_idx]
@@ -83,18 +91,10 @@ class WalkForwardBacktest:
             cash_weight = max(0.0, 1.0 - total_invested_weight)
 
             # --- CORRECTION ICI : Rémunération du Cash ---
-            
-            # 1. Calcul de la durée réelle de la période (pour gérer la dernière semaine si incomplète)
             actual_weeks = next_idx - i
-            
-            # 2. Rendement Simple du Cash sur la période : (1 + r_annuel)^(semaines/52) - 1
             risk_free_period_ret = (1 + RISK_FREE_RATE_ANNUAL) ** (actual_weeks / 52.0) - 1
-            
-            # 3. Conversion en Log Return pour additionner avec les actifs
             risk_free_log_ret = np.log(1 + risk_free_period_ret)
             
-            # 4. Rendement Portefeuille GLOBAL
-            # = (Poids Actifs * Rendement Actifs) + (Poids Cash * Rendement Cash)
             invested_return = np.dot(target_weights.values, asset_period_returns.values)
             cash_return = cash_weight * risk_free_log_ret
             
@@ -124,15 +124,67 @@ class WalkForwardBacktest:
             
             # --- 4. GESTION DU DRIFT ---
             drift_factors = np.exp(asset_period_returns)
-            portfolio_growth_factor = np.exp(port_log_ret) # Inclut maintenant la croissance du cash
+            portfolio_growth_factor = np.exp(port_log_ret) 
             
-            # Les poids des actifs diminuent légèrement si le portefeuille grossit grâce au cash (effet de dilution normal)
             drifted_weights = (target_weights * drift_factors) / portfolio_growth_factor
             
             current_weights = drifted_weights
             current_capital = new_capital
 
         return pd.DataFrame(self.history).set_index('Date')
+
+    def run_with_tranching(self, start_date, step_weeks=4, turnover_buffer=0.40, regime_method='sma', progress_callback=None):
+        """
+        Exécute 4 backtests décalés et retourne les résultats bruts.
+        Ajoute le point de départ (T=0) pour que les graphiques commencent bien au capital initial.
+        """
+        print(f"--- Démarrage du Tranching Séparé | Mode: {regime_method} ---")
+        
+        all_tranches = {}
+        start_dt = pd.to_datetime(start_date)
+        
+        for i in range(step_weeks):
+            offset_date = start_dt + pd.Timedelta(weeks=i)
+            
+            # 1. Reset
+            self.history = []
+            self.weights_history = []
+            
+            # --- NOUVEAU : Sous-fonction pour la progression globale ---
+            def tranche_callback(fraction):
+                if progress_callback:
+                    # Lisse la progression sur les 4 tranches (ex: Tranche 0 va de 0% à 25%)
+                    global_fraction = (i + fraction) / step_weeks
+                    progress_callback(global_fraction)
+
+            # 2. Run
+            res = self.run(
+                start_date=offset_date.strftime('%Y-%m-%d'),
+                step_weeks=step_weeks, 
+                turnover_buffer=turnover_buffer,
+                regime_method=regime_method,
+                progress_callback=tranche_callback # Injection du callback lissé
+            )
+            
+            # --- CORRECTION : AJOUT DU POINT INITIAL (T=0) ---
+            start_row = pd.DataFrame({
+                'Capital': [self.capital],
+                'Net_Return': [0.0],
+                'Turnover': [0.0],
+                'Transaction_Costs': [0.0],
+                'Benchmark_Log_Return': [0.0]
+            }, index=[offset_date]) 
+            
+            res_full = pd.concat([start_row, res])
+            
+            # 3. Stockage
+            tranche_data = {
+                'df': res_full,
+                'weights': list(self.weights_history)
+            }
+            all_tranches[f'Tranche_{i}'] = tranche_data
+            
+        return all_tranches
 
     def _generate_allocation(self, history_df, current_weights, horizon=4, regime_method='sma'):
         expected_returns = {}
@@ -179,21 +231,16 @@ class WalkForwardBacktest:
             
             # --- 1. PRÉDICTION ARIMA (Cumul Horizon) ---
             if stat_mod.arima_model:
-                # On prédit 'horizon' semaines (ex: 4)
+                # On prédit 'horizon' semaines
                 preds = stat_mod.arima_model.predict(n_periods=horizon)
-                # La performance sur 4 semaines est la somme des log-returns hebdo prédits
                 val = np.sum(preds)
                 arima_pred = val / 100.0
             else: arima_pred = 0.0
             
             # --- 2. PRÉDICTION GARCH (Volatilité Horizon) ---
             if garch_res:
-                # On projette la variance sur l'horizon
                 forecasts = garch_res.forecast(horizon=horizon)
-                # On récupère les variances prédites pour t+1, t+2... t+horizon
-                # .iloc[-1] donne la prévision faite à la dernière date dispo
                 vars_horizon = forecasts.variance.iloc[-1].values
-                # Variance totale = Somme des variances (si indépendance temporelle des chocs)
                 total_var = np.sum(vars_horizon)
                 garch_vol = np.sqrt(total_var) / 100.0
             else: 
@@ -206,10 +253,7 @@ class WalkForwardBacktest:
             s_resids = pd.Series(resids, index=resid_index)
             
             # TARGET MODIFIÉE : Somme cumulée des résidus des 'horizon' prochaines semaines
-            # rolling(4).sum() fait la somme de (t-3, t-2, t-1, t). 
-            # Pour avoir la somme de (t+1, t+2, t+3, t+4), on décale en arrière de 'horizon'.
             y_target_resid = s_resids.rolling(window=horizon).sum().shift(-horizon).dropna()
-            # y_target_resid = s_resids.shift(-1).dropna()
             
             X_full_np, _, _, _, _ = prep.get_X_y(train_df, train_df)
             X_full_df = pd.DataFrame(X_full_np, index=train_df.index)
@@ -234,35 +278,30 @@ class WalkForwardBacktest:
                 X_last = X_full_df.iloc[[-1]]
                 xgb_pred = xgb_mod.predict(X_last)[0]
             
-            # Rendement Total Espéré sur 4 semaines
+            # Rendement Total Espéré sur l'horizon
             expected_returns[ticker] = arima_pred + (xgb_pred / 100.0)
             predicted_vols[ticker] = garch_vol
 
         # Matrice de Covariance adaptée
-        # On garde la corrélation hebdomadaire (souvent stable) mais on applique la Volatilité Mensuelle
         recent = history_df.pivot_table(index='Date', columns='Ticker', values='Log Returns').tail(52)
         recent = recent.reindex(columns=self.tickers).fillna(0)
         corr = recent.corr().fillna(0)
         
-        # D contient maintenant les volatilités sur 4 semaines
         D = np.diag([predicted_vols.get(t, 0.01) for t in self.tickers])
         cov_matrix = pd.DataFrame(D @ corr.values @ D, index=self.tickers, columns=self.tickers)
         
         # === CONTRAINTES & BORNES ===
-        bounds = None
+        final_bounds = None
         
         if regime_method == 'sma':
-            # SMA : On calcule les bornes strictes (ex: 0,0 si baissier)
-            # Strategy.get_current_bounds fait déjà le travail actif par actif
+            # SMA : On calcule les bornes strictes
             strat = Strategy(history_df)
             strat.define_market_regime('SMA_50', 'SMA_200')
-            bounds = strat.get_current_bounds(self.tickers)
-            # En SMA, on n'utilise pas bear_probs dans l'optimiseur
+            final_bounds = strat.get_current_bounds(self.tickers)
             assets_bear_probs = None 
             
         elif regime_method == 'hmm':
             # Méthode HMM : Bornes calculées via les probabilités accumulées
-            # On utilise la méthode statique qu'on vient de créer
             final_bounds = HMMStrategy.get_bounds_from_probabilities(
                 self.tickers, 
                 assets_bear_probs, 
@@ -273,69 +312,17 @@ class WalkForwardBacktest:
         opt = MarkowitzOptimizer()
         mu = pd.Series(expected_returns).reindex(self.tickers).fillna(0)
         
-        # Notez bien : bear_probs=None
-        # Car le risque est maintenant géré par les bornes strictes (final_bounds)
-        # On ne veut pas scaler les poids une deuxième fois.
-        
         weights = opt.optimize_portfolio(
             expected_returns=mu,
             cov_matrix=cov_matrix,
             current_weights=current_weights.values,
-            constraints_bounds=final_bounds, # Bornes HMM ou SMA
-            transaction_cost=0.0001,
-            regime_method='sma' , # On utilise les bornes, pas le scaling 'sma'
+            constraints_bounds=final_bounds, # Variable désormais toujours initialisée
+            transaction_cost=self.cost,      # Correction pour utiliser la variable de coût dynamique
+            regime_method='sma',             # On passe 'sma' car final_bounds intègre déjà les contraintes
             bear_probs=None 
         )
         
         return weights
-
-    def run_with_tranching(self, start_date, step_weeks=4, turnover_buffer=0.40, regime_method='sma'):
-        """
-        Exécute 4 backtests décalés et retourne les résultats bruts.
-        Ajoute le point de départ (T=0) pour que les graphiques commencent bien au capital initial.
-        """
-        print(f"--- Démarrage du Tranching Séparé ({step_weeks} tranches) ---")
-        print(f"--- Démarrage du Tranching Séparé | Mode: {regime_method} ---")
-        
-        all_tranches = {}
-        start_dt = pd.to_datetime(start_date)
-        
-        for i in range(step_weeks):
-            offset_date = start_dt + pd.Timedelta(weeks=i)
-            
-            # 1. Reset
-            self.history = []
-            self.weights_history = []
-            
-            # 2. Run
-            res = self.run(
-                start_date=offset_date.strftime('%Y-%m-%d'),
-                step_weeks=step_weeks, 
-                turnover_buffer=turnover_buffer,
-                regime_method=regime_method
-            )
-            
-            # --- CORRECTION : AJOUT DU POINT INITIAL (T=0) ---
-            # On crée une ligne pour la date de départ exacte avec le capital initial
-            start_row = pd.DataFrame({
-                'Capital': [self.capital],
-                'Net_Return': [0.0],
-                'Turnover': [0.0],
-                'Transaction_Costs': [0.0],
-                'Benchmark_Log_Return': [0.0]
-            }, index=[offset_date]) # Index = Date de départ de la tranche
-            
-            # On colle au début du résultat
-            res_full = pd.concat([start_row, res])
-            
-            # 3. Stockage
-            tranche_data = {
-                'df': res_full,
-                'weights': list(self.weights_history)
-            }
-            all_tranches[f'Tranche_{i}'] = tranche_data
-            
-        return all_tranches
 
     def get_metrics(self, df_results):
         if 'Strategy_Equity' not in df_results.columns:
