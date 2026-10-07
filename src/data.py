@@ -118,4 +118,6 @@ def load_market_data(refresh: bool = False, start: str = DATA_START) -> MarketDa
             return fallback
         raise
     save_cache(md)
-    return md
+    # On renvoie la version relue depuis le cache : le script de recherche et
+    # l'application manipulent ainsi exactement les mêmes objets.
+    return load_cache() or md
