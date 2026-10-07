@@ -103,9 +103,17 @@ def _walk_forward_asset(ticker, price, macro, cfg, start_date):
 
 
 def _data_fingerprint(md: MarketData) -> str:
+    """
+    Empreinte du jeu de données, indépendante de la représentation interne :
+    dates normalisées en jours (et non en ns / µs, qui varient selon les versions
+    de pandas / pyarrow), colonnes triées, valeurs float64 arrondies.
+    """
     h = hashlib.sha1()
-    h.update(pd.util.hash_pandas_object(md.prices.round(6), index=True).values.tobytes())
-    h.update(pd.util.hash_pandas_object(md.macro.round(6).fillna(0), index=True).values.tobytes())
+    for frame in (md.prices, md.macro):
+        f = frame.sort_index(axis=1).astype("float64").round(4).fillna(0.0)
+        h.update(",".join(map(str, f.columns)).encode())
+        h.update(pd.DatetimeIndex(f.index).strftime("%Y-%m-%d").str.cat(sep=",").encode())
+        h.update(np.ascontiguousarray(f.values).tobytes())
     return h.hexdigest()[:12]
 
 

@@ -43,9 +43,11 @@ def get_data(refresh_token: int):
 
 
 @st.cache_resource(show_spinner=False)
-def get_signals(fp: str, model_key: str, _md, _cfg):
-    bar = st.progress(0.0, text="Estimation walk-forward ARIMA · GARCH · XGBoost (une fois, puis cache disque)…")
-    out = compute_signal_panel(_md, _cfg.model, progress=lambda f: bar.progress(f, text=f"Signaux walk-forward : {f:.0%} des actifs"))
+def get_signals(fp: str, model_key: str, _md, _cfg, _slot=None):
+    target = _slot if _slot is not None else st
+    bar = target.progress(0.0, text="Estimation walk-forward ARIMA · GARCH · XGBoost en cours (5 à 15 minutes la "
+                                    "première fois, puis cache disque). Ne fermez pas la page.")
+    out = compute_signal_panel(_md, _cfg.model, progress=lambda f: bar.progress(f, text=f"Signaux walk-forward : {f:.0%} des actifs traités"))
     bar.empty()
     return out
 
@@ -113,6 +115,7 @@ st.markdown(
     f'{md.prices.index[-1]:%d/%m/%Y} · ARIMA-XGBoost · GARCH · Markowitz sous filtre SMA · '
     f'benchmark {BENCHMARK_NAME}</div>', unsafe_allow_html=True)
 
+progress_slot = st.empty()   # barre de progression visible quel que soit l'onglet ouvert
 tab1, tab2, tab3 = st.tabs(["Univers & diversification", "Recherche & preuves statistiques", "Backtest & performance"])
 
 with tab1:
@@ -121,18 +124,23 @@ with tab1:
 signals_ready = all(p.exists() for p in cache_paths(md, cfg.model))
 if not signals_ready and not st.session_state.get("compute_signals"):
     msg = ("Les signaux walk-forward ne sont pas encore calculés pour ce jeu de données. Le calcul ré-estime "
-           "chaque semaine ARIMA, GARCH et XGBoost pour chaque actif (environ 5 à 10 minutes sur 4 cœurs), puis "
-           "il est mis en cache sur disque. Il peut aussi être lancé hors interface : python -m scripts.run_research")
-    for tab in (tab2, tab3):
+           "chaque semaine ARIMA, GARCH et XGBoost pour chaque actif (environ 5 à 15 minutes), puis il est mis "
+           "en cache sur disque. Il peut aussi être lancé hors interface : python -m scripts.run_research")
+    expected = cache_paths(md, cfg.model)[0]
+    existing = sorted(expected.parent.glob("signals_*.parquet")) if expected.parent.exists() else []
+    for key, tab in (("go_research", tab2), ("go_performance", tab3)):
         with tab:
             ui.note(msg)
-            if st.button("Calculer les signaux", key=f"go_{id(tab)}", type="primary"):
+            # Clé de widget STABLE : une clé qui change d'une exécution à l'autre fait perdre le clic.
+            if st.button("Calculer les signaux", key=key, type="primary"):
                 st.session_state.compute_signals = True
                 st.rerun()
+            with st.expander("Diagnostic du cache"):
+                st.code(f"Fichier attendu : {expected.name}\n"
+                        f"Fichiers présents : {', '.join(p.name for p in existing) or 'aucun'}")
     st.stop()
 
-with tab2:
-    signals, importance = get_signals(fp, cfg.model.key(), md, cfg)
+signals, importance = get_signals(fp, cfg.model.key(), md, cfg, progress_slot)
 run = get_run(fp, cfg.portfolio, cfg.backtest, cfg.model.key(), md, signals)
 
 with tab2:
