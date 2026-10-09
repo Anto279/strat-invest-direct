@@ -43,13 +43,21 @@ def get_data(refresh_token: int):
 
 
 @st.cache_resource(show_spinner=False)
-def get_signals(fp: str, model_key: str, _md, _cfg, _slot=None):
-    target = _slot if _slot is not None else st
-    bar = target.progress(0.0, text="Estimation walk-forward ARIMA · GARCH · XGBoost en cours (5 à 15 minutes la "
-                                    "première fois, puis cache disque). Ne fermez pas la page.")
-    out = compute_signal_panel(_md, _cfg.model, progress=lambda f: bar.progress(f, text=f"Signaux walk-forward : {f:.0%} des actifs traités"))
-    bar.empty()
-    return out
+def _signals_from_disk(fp: str, model_key: str, _md, _cfg):
+    # Fonction mise en cache SANS aucun appel d'affichage Streamlit : un élément
+    # dessiné dans un conteneur externe ne peut pas être rejoué depuis le cache.
+    return compute_signal_panel(_md, _cfg.model)
+
+
+def get_signals(fp: str, md, cfg, slot):
+    """Calcule les signaux si besoin (avec barre de progression), puis les sert depuis le cache."""
+    if not all(p.exists() for p in cache_paths(md, cfg.model)):
+        bar = slot.progress(0.0, text="Estimation walk-forward ARIMA · GARCH · XGBoost en cours (5 à 15 minutes la "
+                                      "première fois, puis cache disque). Ne fermez pas la page.")
+        compute_signal_panel(md, cfg.model,
+                             progress=lambda f: bar.progress(f, text=f"Signaux walk-forward : {f:.0%} des actifs traités"))
+        slot.empty()
+    return _signals_from_disk(fp, cfg.model.key(), md, cfg)
 
 
 @st.cache_resource(show_spinner="Backtest walk-forward…")
@@ -140,7 +148,7 @@ if not signals_ready and not st.session_state.get("compute_signals"):
                         f"Fichiers présents : {', '.join(p.name for p in existing) or 'aucun'}")
     st.stop()
 
-signals, importance = get_signals(fp, cfg.model.key(), md, cfg, progress_slot)
+signals, importance = get_signals(fp, md, cfg, progress_slot)
 run = get_run(fp, cfg.portfolio, cfg.backtest, cfg.model.key(), md, signals)
 
 with tab2:
