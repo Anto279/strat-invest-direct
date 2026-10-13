@@ -443,7 +443,7 @@ def _section_markowitz(md, run, cfg, fp, ticker, signals):
 
     st.markdown("### Contrôle des bornes par les moyennes mobiles long terme")
     st.markdown(
-        f"Score de tendance s = moyenne de 1{{P > SMA_L}} pour L ∈ {set(cfg.model.sma_windows)} semaines "
+        f"Score de tendance s = moyenne de 1{{P > SMA_L}} pour L ∈ {{{', '.join(map(str, cfg.model.sma_windows))}}} semaines "
         "(la SMA 40 semaines correspond à la règle 10 mois / 200 jours de Faber, 2007). La borne haute d'un actif vaut "
         "w_max · s. Le filtre ne force jamais l'achat. Il retire progressivement l'actif de l'ensemble admissible "
         "quand sa tendance se dégrade, et le capital libéré va en T-Bills ou vers les actifs en tendance. "
